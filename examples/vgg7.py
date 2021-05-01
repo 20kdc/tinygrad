@@ -3,6 +3,7 @@ from tinygrad.tensor import Tensor
 from tinygrad.optim import SGD
 import extra.waifu2x
 from extra.kinne import KinneDir
+import numpy
 import sys
 import os
 import random
@@ -24,6 +25,12 @@ if len(sys.argv) < 2:
   print("python3 -m examples.vgg7 execute_full MODELDIR IMG_IN IMG_OUT")
   print(" does the 'whole thing' (padding, tiling)")
   print(" safe for large images, etc.")
+  print("python3 -m examples.vgg7 execute_amf32 MODELDIR IN OUT")
+  print(" like execute_full, but works with a mono little-endian floating-point audio source")
+  print(" if you even see this, it means this worked better than expected")
+  print(" helpful SoX notes:")
+  print("  play -t f32 -r 12000 -c 1 --endian little test.l.12000.f32.raw")
+  print("  play --combine merge -t f32 -r 12000 -c 1 --endian little test.l.12000.f32.raw -t f32 -r 12000 -c 1 --endian little test.r.12000.f32.raw")
   print("python3 -m examples.vgg7 new MODELDIR")
   print(" creates a new model (experimental)")
   print("python3 -m examples.vgg7 train MODELDIR SAMPLES_DIR SAMPLES_COUNT ROUNDS")
@@ -68,6 +75,25 @@ elif cmd == "execute_full":
   load_and_save(model, False)
 
   extra.waifu2x.image_save(out_file, vgg7.forward_tiled(extra.waifu2x.image_load(in_file), 156))
+elif cmd == "execute_amf32":
+  model = sys.argv[2]
+  in_file = sys.argv[3]
+  out_file = sys.argv[4]
+
+  load_and_save(model, False)
+
+  # input
+  val = numpy.fromfile(in_file, "<f4")
+  # input processing
+  val = (val + 1.0) / 2.0
+  val = val.reshape(1, 1, -1, 1).repeat(3, 1)
+  # mid
+  val = vgg7.forward_tiled(val, 16384)
+  # output processing
+  val = val[0, 0, :, 0].reshape(-1)
+  val = (val * 2.0) - 1.0
+  # output
+  val.astype("<f4", "C").tofile(out_file)
 elif cmd == "new":
   model = sys.argv[2]
 
