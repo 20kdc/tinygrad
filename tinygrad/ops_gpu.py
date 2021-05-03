@@ -69,6 +69,23 @@ def gpu_download_buffers(kpm, buffers):
   last_seq.eval_async(kp.OpTensorSyncLocal(buffers))
   last_seq.eval_await()
 
+def shape_len(shape):
+  iterations = 1
+  for v in shape:
+    iterations *= v
+  return iterations
+
+# ----------------------------------
+
+def basic_2p(ctx, x, y, program):
+  # print(ctx.vk_mgr)
+  res_shape = tuple(np.max([x.shape, y.shape], 0))
+  iterations = shape_len(res_shape)
+  res = GPUBuffer(res_shape)
+  mpi = mul_program.instance(ctx.vk_mgr, [x.cl_v, y.cl_v, res.cl_v], iterations)
+  ctx.vk_mgr.sequence().record(kp.OpAlgoDispatch(mpi)).eval()
+  return res
+
 # ----------------------------------
 
 mul_program = PotentialProgram(["in_av", "in_bv", "out_ov"], [], """
@@ -80,13 +97,98 @@ mul_program = PotentialProgram(["in_av", "in_bv", "out_ov"], [], """
 
 class Mul(Function):
   def forward(ctx, x, y):
+    return basic_2p(ctx, x, y, mul_program)
+  def backward():
+    raise Exception("NYI")
+
+# ----------------------------------
+
+add_program = PotentialProgram(["in_av", "in_bv", "out_ov"], [], """
+  // iterationID is the index of out_ov to set
+  uint inAIdx = iterationID % uint(in_av_len);
+  uint inBIdx = iterationID % uint(in_bv_len);
+  out_ov[iterationID] = in_av[inAIdx] + in_bv[inBIdx];
+""")
+
+class Add(Function):
+  def forward(ctx, x, y):
+    return basic_2p(ctx, x, y, add_program)
+  def backward():
+    raise Exception("NYI")
+
+# ----------------------------------
+
+sub_program = PotentialProgram(["in_av", "in_bv", "out_ov"], [], """
+  // iterationID is the index of out_ov to set
+  uint inAIdx = iterationID % uint(in_av_len);
+  uint inBIdx = iterationID % uint(in_bv_len);
+  out_ov[iterationID] = in_av[inAIdx] - in_bv[inBIdx];
+""")
+
+class Sub(Function):
+  def forward(ctx, x, y):
+    return basic_2p(ctx, x, y, sub_program)
+  def backward():
+    raise Exception("NYI")
+
+# ----------------------------------
+
+class Reshape(Function):
+  def forward(ctx, x, shape):
+    original_len = shape_len(x.shape)
+    # we need to determine 'true shape' (i.e. accounting for that pesky -1)
+    true_shape = list(shape)
+    main_mul = 1
+    for v in true_shape:
+      if v != -1:
+        main_mul *= v
+    for i in range(len(true_shape)):
+      if true_shape[i] == -1:
+        true_shape[i] = original_len // main_mul
+    res = GPUBuffer(true_shape)
+    ctx.vk_mgr.sequence().record(kp.OpTensorCopy([x.cl_v, res.cl_v])).eval()
+    return res
+  def backward():
+    raise Exception("NYI")
+
+# ----------------------------------
+
+# TODO TODO THIS IS CLEARLY WRONG TODO TODO
+
+conv2d_program = PotentialProgram(["in_av", "in_bv", "out_ov"], [], """
+  // iterationID is the index of out_ov to set
+  uint inAIdx = iterationID % uint(in_av_len);
+  uint inBIdx = iterationID % uint(in_bv_len);
+  out_ov[iterationID] = 1.0; //in_av[inAIdx] + in_bv[inBIdx];
+""")
+
+class Conv2D(Function):
+  def forward(ctx, x, y):
     # print(ctx.vk_mgr)
-    res_shape = tuple(np.max([x.shape, y.shape], 0))
-    iterations = 1
-    for v in res_shape:
-      iterations *= v
+    res_shape = list(x.shape)
+    assert len(res_shape) == 4
+    res_shape[1] = y.shape[0]
+    res_shape[2] -= 2
+    res_shape[3] -= 2
+    iterations = shape_len(res_shape)
     res = GPUBuffer(res_shape)
-    mpi = mul_program.instance(ctx.vk_mgr, [x.cl_v, y.cl_v, res.cl_v], iterations)
+    mpi = conv2d_program.instance(ctx.vk_mgr, [x.cl_v, y.cl_v, res.cl_v], iterations)
+    ctx.vk_mgr.sequence().record(kp.OpAlgoDispatch(mpi)).eval()
+    return res
+  def backward():
+    raise Exception("NYI")
+
+# ----------------------------------
+
+relu_program = PotentialProgram(["in_av", "out_ov"], [], """
+  out_ov[iterationID] = max(in_av[iterationID], 0.0);
+""")
+
+class ReLU(Function):
+  def forward(ctx, x):
+    iterations = shape_len(x.shape)
+    res = GPUBuffer(x.shape)
+    mpi = add_program.instance(ctx.vk_mgr, [x.cl_v, res.cl_v], iterations)
     ctx.vk_mgr.sequence().record(kp.OpAlgoDispatch(mpi)).eval()
     return res
   def backward():

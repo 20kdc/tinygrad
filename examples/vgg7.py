@@ -61,7 +61,7 @@ cmd = sys.argv[1]
 vgg7 = extra.waifu2x.Vgg7()
 
 def nansbane(p):
-  if numpy.isnan(numpy.min(p.data)):
+  if numpy.isnan(numpy.min(p.cpu().data)):
     raise Exception("A NaN in the model has been detected. This model will not be interacted with to prevent further damage.")
 
 def load_and_save(path, save):
