@@ -24,8 +24,6 @@ class ProfileOp:
     if DEBUG: self.st = time.time()
   def __exit__(self, *junk):
     if DEBUG:
-      if cl_queue is not None:
-        cl_queue.finish()
       et = (time.time()-self.st)*1000.
       debug_counts[self.name] += 1
       debug_times[self.name] += et
@@ -33,24 +31,29 @@ class ProfileOp:
 
 # **** GPU functions ****
 
-cl_ctx, cl_queue = None, None
+vk_mgr = None
 def require_init_gpu():
-  if not GPU: raise Exception("No GPU Support, install pyopencl")
-  global cl_ctx, cl_queue
-  if cl_queue is None:
-    devices = cl.get_platforms()[0].get_devices(device_type=cl.device_type.GPU)
-    if len(devices) == 0:
-      devices = cl.get_platforms()[0].get_devices(device_type=cl.device_type.CPU)
-    cl_ctx = cl.Context(devices=devices)
-    # this is an in-order command queue
-    cl_queue = cl.CommandQueue(cl_ctx)
+  global vk_mgr
+  if not GPU: raise Exception("No GPU Support, install vulkan-kompute")
+  if vk_mgr is None:
+    vk_mgr = kp.Manager()
+    print(vk_mgr.get_device_properties())
 
 class GPUBuffer:
   def __init__(self, shape, hostbuf=None):
     self.shape, self.dtype = tuple(shape), np.float32
-    self.cl = hostbuf.cl if isinstance(hostbuf, GPUBuffer) else \
-      cl.Buffer(cl_ctx, cl.mem_flags.READ_WRITE | (cl.mem_flags.COPY_HOST_PTR if hostbuf is not None else 0), 4*np.prod(shape),
-                hostbuf=hostbuf.astype(np.float32).ravel() if hostbuf is not None else None)
+    require_init_gpu()
+    if isinstance(hostbuf, GPUBuffer):
+      self.cl_v = hostbuf.cl_v
+      self.cl_s = hostbuf.cl_s
+    elif hostbuf is None:
+      self.cl_v = vk_mgr.tensor(np.zeros(shape))
+      self.cl_s = vk_mgr.tensor_t(np.array(shape).astype(np.uint32))
+    else:
+      from .ops_gpu import gpu_upload_buffers
+      self.cl_v = vk_mgr.tensor(hostbuf)
+      self.cl_s = vk_mgr.tensor_t(np.array(shape).astype(np.uint32))
+      gpu_upload_buffers(vk_mgr, [self.cl_v, self.cl_s])
 
   def __repr__(self):
     return f"<GPUBuffer with shape {self.shape!r}>"
@@ -157,9 +160,10 @@ class Tensor:
     if isinstance(data, GPUBuffer):
       if device == Device.GPU: return data
       old = data
-      data = np.empty(old.shape, dtype=np.float32)
       with ProfileOp("toCPU", [data]):
-        cl.enqueue_copy(cl_queue, data, old.cl, is_blocking=True)
+        from .ops_gpu import gpu_download_buffers
+        gpu_download_buffers(vk_mgr, [old.cl_v])
+        data = old.cl_v.data().reshape(old.shape)
 
     elif "ANETensor" in str(type(data)):
       if device == Device.ANE: return data
@@ -328,7 +332,7 @@ def register(name, fxn, device=Device.CPU):
     tt = [arg for arg in x if isinstance(arg, Tensor)][0]
     x = [Tensor(np.array([arg], dtype=tt.dtype), device=tt.device, requires_grad=False) if not isinstance(arg, Tensor) else arg for arg in x]
     f = Tensor.ops[tt.device][name]
-    f.cl_ctx, f.cl_queue, f.ane, f.device = cl_ctx, cl_queue, ane, tt.device
+    f.vk_mgr, f.ane, f.device = vk_mgr, ane, tt.device
     return f.apply(f, *x, **kwargs)
   setattr(Tensor, name, dispatch)
   if name in ['add', 'sub', 'mul', 'pow', 'matmul']:
@@ -348,7 +352,7 @@ def _register_ops(namespace, device=Device.CPU):
 from tinygrad import ops_cpu
 _register_ops(ops_cpu)
 try:
-  import pyopencl as cl
+  import kp
   # TODO: move this import to require_init_gpu?
   from tinygrad import ops_gpu
   _register_ops(ops_gpu, device=Device.GPU)
