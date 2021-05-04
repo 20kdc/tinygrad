@@ -1,0 +1,4 @@
+CARROT: VGG7
+PEA: Custom VGG7-derived audio network
+SPROUT: Probably Upconv7 if I can make that work
+

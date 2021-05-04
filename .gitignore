@@ -8,3 +8,11 @@ dist
 *.egg-info
 /env
 a.out
+pea/dataset
+pea/model
+pea/*.raw
+
+scratch
+scratci
+uscr
+
