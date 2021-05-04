@@ -129,22 +129,28 @@ class Pea:
 def into_cdat_i(image):
   assert len(image.shape) == 2
   assert image.shape[1] == 2
+  # Adjust levels (To 0 1)
+  image = (image + 1) / 2
   # Rearrange input to (2, N) for expand into reshape
   image = numpy.moveaxis(image, 1, 0)
   # Actually reshape into final (1, 2, 1, N) form
   return image.reshape(1, 2, 1, -1)
 
-def from_cdat_o(image_out):
+def from_cdat_o(image):
+  # Adjust levels (To -1 1)
+  image = (image * 2) - 1
   # The data (1, 4, 1, in_samples) needs to be rearranged.
   # Into (1, 1, in_samples, 4)
-  image_out = numpy.moveaxis(image_out, 1, 3)
+  image = numpy.moveaxis(image, 1, 3)
   # And finish by pulling the upper axis into samples
-  return image_out.reshape(image_out.shape[2] * 2, 2)
+  return image.reshape(image.shape[2] * 2, 2)
 
 # For training
 def into_cdat_o(image):
   assert len(image.shape) == 2
   assert image.shape[1] == 2
+  # Adjust levels (To 0 1)
+  image = (image + 1) / 2
   # Expand channel count to 4 so it captures pairing
   image = image.reshape(-1, 4)
   # Rearrange input to (4, N) for expand into reshape
