@@ -35,20 +35,44 @@ class Conv3x1Biased:
   def get_parameters(self) -> list:
     return [self.weight, self.bias]
 
+global PEA_CONFIGS
+PEA_CONFIGS = {
+  "1": {
+    "channels": [
+      32, 32, 64, 64, 128, 128
+    ],
+    "noisechk": False
+  },
+  "2": {
+    "channels": [
+      48, 48, 48, 48, 48, 48, 48, 48,
+      48, 48, 48, 48, 48, 48, 48
+    ],
+    "noisechk": True
+  },
+}
+
 class Pea:
   """
   The PEA network.
   PEA is designed for audio upscaling.
   """
 
-  def __init__(self):
-    self.conv1 = Conv3x1Biased(2, 32)
-    self.conv2 = Conv3x1Biased(32, 32)
-    self.conv3 = Conv3x1Biased(32, 64)
-    self.conv4 = Conv3x1Biased(64, 64)
-    self.conv5 = Conv3x1Biased(64, 128)
-    self.conv6 = Conv3x1Biased(128, 128)
-    self.conv7 = Conv3x1Biased(128, 4, True)
+  def __init__(self, cfg):
+    channels = 2
+    self.convs = []
+    self.noisechk = cfg["noisechk"]
+    for v in cfg["channels"]:
+      self.convs.append(Conv3x1Biased(channels, v))
+      channels = v
+    self.convs.append(Conv3x1Biased(channels, 4, True))
+
+  def context(self):
+    """
+    Gives the required amount of context.
+    This is per-direction - multiply by 2 for total context.
+    """
+    return len(self.convs)
 
   def forward(self, x):
     """
@@ -59,17 +83,39 @@ class Pea:
     Note that the first 2 output channels and the second 2 output channels represent separate frames.
     This is so "non-overlapping deconvolution" can be achieved simply through a reshape.
     """
-    x = self.conv1.forward(x).leakyrelu(0.1)
-    x = self.conv2.forward(x).leakyrelu(0.1)
-    x = self.conv3.forward(x).leakyrelu(0.1)
-    x = self.conv4.forward(x).leakyrelu(0.1)
-    x = self.conv5.forward(x).leakyrelu(0.1)
-    x = self.conv6.forward(x).leakyrelu(0.1)
-    x = self.conv7.forward(x).leakyrelu(0.1)
+    for v in self.convs:
+      x = v.forward(x).leakyrelu(0.1)
     return x
 
   def get_parameters(self) -> list:
-    return self.conv1.get_parameters() + self.conv2.get_parameters() + self.conv3.get_parameters() + self.conv4.get_parameters() + self.conv5.get_parameters() + self.conv6.get_parameters() + self.conv7.get_parameters()
+    parameters = []
+    for v in self.convs:
+      parameters += v.get_parameters()
+    return parameters
+
+  def loss(self, out, sample_y):
+    # | ||
+    # |||_
+    standard_loss = (sample_y - out).abs().mean()
+    if not self.noisechk:
+      return standard_loss
+    else:
+      # So the main thing I've found is that PEA1 can't handle noise.
+      # So this is a little workaround for that.
+      out = out.reshape(shape = (2, 2, -1))
+      sample_y = sample_y.reshape(shape = (2, 2, -1))
+      # (subSample, channel, superSample)
+      # remap things around a bit - rather than comparing specific values,
+      #  compare the min/max.
+      # each of these is a (channel, superSample)
+      out_min = (out * -1).max(axis = 0) * -1
+      out_max = out.max(axis = 0)
+      sample_y_min = (sample_y * -1).max(axis = 0) * -1
+      sample_y_max = sample_y.max(axis = 0)
+      error_min = (sample_y_min - out_min).abs()
+      error_max = (sample_y_max - out_max).abs()
+      # Keep some standard loss to try and keep it getting directions right.
+      return (error_min + error_max).mean() + (standard_loss * 0.125)
 
   def forward_tiled(self, image: numpy.ndarray, tile_size: int) -> numpy.ndarray:
     """
@@ -80,7 +126,7 @@ class Pea:
     in_samples = image.shape[0]
 
     # Constant that only really gets repeated a ton here.
-    context = 7
+    context = self.context()
     context2 = context + context
 
     image = into_cdat_i(image)

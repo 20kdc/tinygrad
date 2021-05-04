@@ -8,13 +8,13 @@ dist
 *.egg-info
 /env
 a.out
+
+# PEA model
 pea/dataset
-pea/model
+pea/model.*
 pea/*.raw
 
-scratch
-scratci
-uscr
-finale
-finale2flac
+# User scripts
+s.*
+current_model
 
