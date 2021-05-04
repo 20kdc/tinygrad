@@ -97,6 +97,7 @@ class Pea:
     # As such, the tiles overlap.
     out_tile_size = tile_size - context2
     for out_x in range(0, image_out.shape[3], out_tile_size):
+      print(str(out_x) + " / " + str(image_out.shape[3]))
       # Input is sourced from the same coordinates, but some stuff ought to be
       #  noted here for future reference:
       # + out_x/y's equivalent position w/ the padding is out_x + context.

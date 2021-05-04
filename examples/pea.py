@@ -63,7 +63,7 @@ elif cmd == "execute_full":
   load_and_save(False)
 
   in_file = numpy.fromfile(in_file, "<f4").reshape((-1, 2))
-  pea.forward_tiled(in_file, 156).astype("<f4", "C").tofile(out_file)
+  pea.forward_tiled(in_file, 65536).astype("<f4", "C").tofile(out_file)
 elif cmd == "new":
   os.mkdir(MODEL)
   load_and_save(True)
