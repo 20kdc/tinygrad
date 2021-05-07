@@ -36,8 +36,8 @@ class PotentialProgram:
       binding_id += 1
 
     header += "void main() {\n"
-    header += "uint iterationID = gl_GlobalInvocationID.x + (gl_GlobalInvocationID.y * 65536);\n"
-    header += "if (iterationID >= (uint(iterations_l) + (uint(iterations_h) * 65536))) return;\n"
+    header += "uint iterationID = gl_GlobalInvocationID.x + (gl_GlobalInvocationID.y << 16);\n"
+    header += "if (iterationID >= (uint(iterations_l) + (uint(iterations_h) << 16))) return;\n"
     footer = "\n}"
 
     self.spirv = kp.Shader.compile_source(header + code + footer)
@@ -51,10 +51,23 @@ class PotentialProgram:
     specconsts += regularconsts
     # this must occur after the above iterations constants
     iterations = (iterations + (WAVEFRONT - 1)) // WAVEFRONT
+    # right, so, now that's done, classify how this is going to be handled
+    if iterations <= 0xFFFF:
+      # 'small' : direct
+      wg_x = iterations
+      wg_y = 1
+    elif iterations <= (0xFFFF * 0xFFFF):
+      # 'large' : indirect
+      # note that we can't use 65536
+      wg_x = (iterations + 0xFFFE) // 0xFFFF
+      wg_y = 0xFFFF
+    else:
+      raise Exception("Iteration count too high")
+    assert((wg_x * wg_y) >= iterations)
     return mgr.algorithm(
         native_tensors,
         self.spirv,
-        (iterations & 0xFFFF, iterations >> 16, 1),
+        (wg_x, wg_y, 1),
         specconsts,
         pushconsts
     )
@@ -188,8 +201,10 @@ class ReLU(Function):
   def forward(ctx, x):
     iterations = shape_len(x.shape)
     res = GPUBuffer(x.shape)
-    mpi = add_program.instance(ctx.vk_mgr, [x.cl_v, res.cl_v], iterations)
-    ctx.vk_mgr.sequence().record(kp.OpAlgoDispatch(mpi)).eval()
+    mpi = relu_program.instance(ctx.vk_mgr, [x.cl_v, res.cl_v], iterations)
+    seq = ctx.vk_mgr.sequence()
+    seq.eval_async(kp.OpAlgoDispatch(mpi))
+    seq.eval_await()
     return res
   def backward():
     raise Exception("NYI")
