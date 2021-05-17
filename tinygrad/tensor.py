@@ -163,7 +163,9 @@ class Tensor:
       with ProfileOp("toCPU", [data]):
         from .ops_gpu import gpu_download_buffers
         gpu_download_buffers(vk_mgr, [old.cl_v])
-        data = old.cl_v.data().reshape(old.shape)
+        # np.copy here is a workaround for a vulkan-kompute bug (uncertain if actually bug):
+        #  when the tensor dies, .data() goes with it (causes interpreter crash)
+        data = np.copy(old.cl_v.data()).reshape(old.shape)
 
     elif "ANETensor" in str(type(data)):
       if device == Device.ANE: return data
