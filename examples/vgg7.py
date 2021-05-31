@@ -39,10 +39,11 @@ if len(sys.argv) < 2:
   print("python3 -m examples.vgg7 execute_full MODELDIR IMG_IN IMG_OUT")
   print(" does the 'whole thing' (padding, tiling)")
   print(" safe for large images, etc.")
-  print("python3 -m examples.vgg7 execute_celery MODELDIR IMG_IN IMG_OUT PASSES DIR")
+  print("python3 -m examples.vgg7 execute_celery[_memes] MODELDIR IMG_IN IMG_OUT PASSES DIR")
   print(" extends an image in all directions (-1) or a given (0, 1, 2, 3) direction")
   print(" by a given number of passes, assuming a CELERY model.")
   print(" direction order is down, up, left, right.")
+  print(" with memes enabled, clamping is disabled which will cause internal deepfrying in some situations")
   print("python3 -m examples.vgg7 new MODELDIR")
   print(" creates a new model")
   print("python3 -m examples.vgg7 train[_celery] MODELDIR SAMPLES_DIR ROUNDS ROUNDS_SAVE LR")
@@ -126,12 +127,13 @@ elif cmd == "execute_full":
   load_and_save(model, False)
 
   extra.waifu2x.image_save(out_file, vgg7.forward_tiled(extra.waifu2x.image_load(in_file), 156))
-elif cmd == "execute_celery":
+elif cmd == "execute_celery" or cmd == "execute_celery_memes":
   model = sys.argv[2]
   in_file = sys.argv[3]
   out_file = sys.argv[4]
   passes = int(sys.argv[5])
   direction = int(sys.argv[6])
+  memes = cmd == "execute_celery_memes"
 
   load_and_save(model, False)
 
@@ -155,6 +157,9 @@ elif cmd == "execute_celery":
       context = numpy.pad(context, [[0, 0], [0, 0], [0, CONTEXT], [CONTEXT, CONTEXT]], mode = "edge")
       # calculate
       result = vgg7.forward(Tensor(context, requires_grad = False)).data
+      if not memes:
+        # clamp calculations
+        result = numpy.fmax(numpy.fmin(result, 1), 0)
       # append result
       image = numpy.append(image, result, 2)
       if direction == -1:
