@@ -44,26 +44,33 @@ if len(sys.argv) < 2:
   print(" by a given number of passes, assuming a CELERY model.")
   print(" direction order is down, up, left, right.")
   print("python3 -m examples.vgg7 new MODELDIR")
-  print(" creates a new model (experimental)")
-  print("python3 -m examples.vgg7 train MODELDIR SAMPLES_DIR ROUNDS ROUNDS_SAVE LR")
-  print(" trains a model (experimental)")
-  print(" (how experimental? well, every time I tried it, it flooded w/ NaNs)")
+  print(" creates a new model")
+  print("python3 -m examples.vgg7 train[_celery] MODELDIR SAMPLES_DIR ROUNDS ROUNDS_SAVE LR")
+  print(" trains a model")
+  print(" LR notes from CELERY:")
+  print("  0.001 is too unstable for use it seems")
+  print("  0.0001 is good for a first training round but will vary in colour stability, keep an eye on how good it is with slopes")
+  print("  0.00001 use once it's clear 0.0001 keeps screwing itself over")
+  print("   after 256 rounds I saw better colour stability but with 'hard-fail' cases still around")
+  print("   after 768 rounds major stability improvements were visible")
+  print("   after 1792 rounds issues on chesscorner,16,-1 were constrained to haloing")
+  print("   unfortunately lowering LR past this point doesn't appear to do much")
   print(" note: ROUNDS < 0 means 'forever'. ROUNDS_SAVE <= 0 is not a good idea.")
-  print(" expects roughly execute's input as SAMPLES_DIR/IDXa.png")
-  print(" expects roughly execute's output as SAMPLES_DIR/IDXb.png")
-  print(" (i.e. my_samples/0a.png is the first pre-nearest-scaled image,")
-  print("       my_samples/0b.png is the first original image)")
-  print(" in addition, SAMPLES_DIR/samples_count.txt indicates sample count")
-  print(" won't pad or tile, so keep image sizes sane")
+  print(" NORMAL:")
+  print("  expects roughly execute's input as SAMPLES_DIR/IDXa.png")
+  print("  expects roughly execute's output as SAMPLES_DIR/IDXb.png")
+  print("  (i.e. my_samples/0a.png is the first pre-nearest-scaled image,")
+  print("        my_samples/0b.png is the first original image)")
+  print("  in addition, SAMPLES_DIR/samples_count.txt indicates sample count")
+  print("  won't pad or tile, so keep image sizes sane")
+  print(" CELERY:")
+  print("  SAMPLES_DIR is just a directory full of images")
+  print("  *all images are loaded into memory at once*")
+  print("  random samples are automatically taken and trained on")
   print("python3 -m examples.vgg7 samplify IMG_A IMG_B SAMPLES_DIR SIZE")
   print(" creates overlapping micropatches (SIZExSIZE w/ 7-pixel border) for training")
   print(" maintains/creates samples_count.txt automatically")
   print(" unlike training, IMG_A must be exactly half the size of IMG_B")
-  print("python3 -m examples.vgg7 samplify_celery IMG SAMPLES_DIR SIZE")
-  print(" FOR CELERY: creates overlapping micropatches (SIZEx1 w/ 7-pixel border) for training")
-  print(" maintains/creates samples_count.txt automatically")
-  print(" 'A/B' images for CELERY network will automatically be generated.")
-  print(" (Both require some internal processing to work properly.)")
   sys.exit(1)
 
 cmd = sys.argv[1]
@@ -94,39 +101,6 @@ def load_and_save_rmsprop(rmsprop, path, save):
   if not save:
     for v in vgg7.get_parameters():
       nansbane(v)
-
-def actual_patch_extractor(a_img, b_img, samples_base, sample_size_w, sample_size_h, celery):
-  samples_count = get_sample_count(samples_base)
-  samples_added = 0
-
-  # this performs the first part of lower crop blinding for CELERY
-  required_lower_patch_context = CONTEXT
-  if celery:
-    required_lower_patch_context = 0
-  # actual patch extraction
-  for posy in range(CONTEXT, b_img.shape[2] - (required_lower_patch_context + sample_size_h - 1), sample_size_h):
-    for posx in range(CONTEXT, b_img.shape[3] - (CONTEXT + sample_size_w - 1), sample_size_w):
-      # this is a viable patch location, add it
-      # note the ranges here:
-      #  + there are always CONTEXT pixels *before* the point
-      #  + with no subtraction at the end, there'd already be a pixel *at* the point,
-      #     as ranges are exclusive
-      #  + additionally, there are sample_size - 1 additional sample pixels
-      #  + additionally, there are CONTEXT additional pixels
-      #  + therefore there are CONTEXT + sample_size pixels *at & after* the point
-      patch_x = a_img[:, :, posy - CONTEXT : posy + required_lower_patch_context + sample_size_h, posx - CONTEXT : posx + CONTEXT + sample_size_w]
-      if celery:
-        # now we only have the upper half of the patch, extend
-        patch_x = numpy.pad(patch_x, [[0, 0], [0, 0], [0, CONTEXT], [0, 0]], mode = "edge")
-      patch_y = b_img[:, :, posy : posy + sample_size_h, posx : posx + sample_size_w]
-
-      extra.waifu2x.image_save(samples_base + "/" + str(samples_count) + "a.png", patch_x)
-      extra.waifu2x.image_save(samples_base + "/" + str(samples_count) + "b.png", patch_y)
-      samples_count += 1
-      samples_added += 1
-
-  print("Added " + str(samples_added) + " samples")
-  set_sample_count(samples_base, samples_count)
 
 if cmd == "import":
   src = sys.argv[2]
@@ -199,13 +173,63 @@ elif cmd == "new":
 
   os.mkdir(model)
   load_and_save(model, True)
-elif cmd == "train":
+elif cmd == "train" or cmd == "train_celery":
   model = sys.argv[2]
   samples_base = sys.argv[3]
-  samples_count = get_sample_count(samples_base)
   rounds = int(sys.argv[4])
   rounds_per_save = int(sys.argv[5])
   lr = float(sys.argv[6])
+
+  celery = cmd == "train_celery"
+
+  class SamplesSourceArbitrary:
+    def __init__(self, path):
+      self.path = path
+      self.count = samples_count
+    def get_sample(self):
+      sample_idx = random.randint(0, self.count - 1)
+      x_img = extra.waifu2x.image_load(self.path + "/" + str(sample_idx) + "a.png")
+      y_img = extra.waifu2x.image_load(self.path + "/" + str(sample_idx) + "b.png")
+      return (x_img, y_img)
+
+  class SamplesSourceCelery:
+    def __init__(self, path, bs):
+      self.path = path
+      self.bs = bs
+      self.contents = []
+      for v in os.listdir(path):
+        print(v)
+        img = extra.waifu2x.image_load(path + "/" + v)
+        self.contents.append(img)
+        img = extra.waifu2x.image_rotate_clockwise(img)
+        self.contents.append(img)
+        img = extra.waifu2x.image_rotate_clockwise(img)
+        self.contents.append(img)
+        img = extra.waifu2x.image_rotate_clockwise(img)
+        self.contents.append(img)
+    def get_sample(self):
+      sample_idx = random.randint(0, len(self.contents) - 1)
+      o_img = self.contents[sample_idx]
+      btl_in_x = random.randint(CONTEXT, o_img.shape[3] - (CONTEXT + self.bs))
+      btl_in_y = random.randint(CONTEXT, o_img.shape[2] - 2)
+      # x_img is all context above and at the input btl
+      x_img = o_img[:, :, btl_in_y - CONTEXT : btl_in_y + 1, btl_in_x - CONTEXT : btl_in_x + (CONTEXT + self.bs)]
+      # pad x_img downwards
+      x_img = numpy.pad(x_img, [[0, 0], [0, 0], [0, CONTEXT], [0, 0]], mode = "edge")
+      # y_img is the line below the input
+      y_img = o_img[:, :, btl_in_y + 1 : btl_in_y + 2, btl_in_x : btl_in_x + self.bs]
+      #print(x_img.shape)
+      #print(y_img.shape)
+      return (x_img, y_img)
+
+  samples_source = None
+  if not celery:
+    samples_source = SamplesSourceArbitrary(samples_base)
+  else:
+    # it seems BS values that do not equal 1 increase the amount of unwanted cross-talk
+    samples_source = SamplesSourceCelery(samples_base, 1)
+
+  samples_count = get_sample_count(samples_base)
 
   load_and_save(model, False)
 
@@ -225,10 +249,7 @@ elif cmd == "train":
     if rnum == rounds:
       break
 
-    sample_idx = random.randint(0, samples_count - 1)
-
-    x_img = extra.waifu2x.image_load(samples_base + "/" + str(sample_idx) + "a.png")
-    y_img = extra.waifu2x.image_load(samples_base + "/" + str(sample_idx) + "b.png")
+    x_img, y_img = samples_source.get_sample()
 
     sample_x = Tensor(x_img, requires_grad = False)
     sample_y = Tensor(y_img, requires_grad = False)
@@ -294,25 +315,30 @@ elif cmd == "samplify":
   # pre-upscaling - this matches the sizes (and coordinates)
   a_img = a_img.repeat(2, 2).repeat(2, 3)
 
-  actual_patch_extractor(a_img, b_img, samples_base, sample_size, sample_size, False)
+  samples_count = get_sample_count(samples_base)
+  samples_added = 0
 
-elif cmd == "samplify_celery":
-  o_img = sys.argv[2]
-  samples_base = sys.argv[3]
-  sample_size = int(sys.argv[4])
+  # actual patch extraction
+  for posy in range(CONTEXT, b_img.shape[2] - (CONTEXT + sample_size_h - 1), sample_size_h):
+    for posx in range(CONTEXT, b_img.shape[3] - (CONTEXT + sample_size_w - 1), sample_size_w):
+      # this is a viable patch location, add it
+      # note the ranges here:
+      #  + there are always CONTEXT pixels *before* the point
+      #  + with no subtraction at the end, there'd already be a pixel *at* the point,
+      #     as ranges are exclusive
+      #  + additionally, there are sample_size - 1 additional sample pixels
+      #  + additionally, there are CONTEXT additional pixels
+      #  + therefore there are CONTEXT + sample_size pixels *at & after* the point
+      patch_x = a_img[:, :, posy - CONTEXT : posy + CONTEXT + sample_size_h, posx - CONTEXT : posx + CONTEXT + sample_size_w]
+      patch_y = b_img[:, :, posy : posy + sample_size_h, posx : posx + sample_size_w]
 
-  # Right, so: This original image has to be split into two, with one line removed in each variant.
-  o_img = extra.waifu2x.image_load(o_img)
+      extra.waifu2x.image_save(samples_base + "/" + str(samples_count) + "a.png", patch_x)
+      extra.waifu2x.image_save(samples_base + "/" + str(samples_count) + "b.png", patch_y)
+      samples_count += 1
+      samples_added += 1
 
-  # as with the main library body,
-  # Y X order is used here
-
-  # Create the two versions. Note that it's just a 1-line shift.
-  # Contextual blinding is handled in the patch extractor.
-  a_img = o_img[:, :, 0 : o_img.shape[2] - 1, 0 : o_img.shape[3]]
-  b_img = o_img[:, :, 1 : o_img.shape[2], 0 : o_img.shape[3]]
-
-  actual_patch_extractor(a_img, b_img, samples_base, sample_size, 1, True)
+  print("Added " + str(samples_added) + " samples")
+  set_sample_count(samples_base, samples_count)
 
 else:
   print("unknown command")
