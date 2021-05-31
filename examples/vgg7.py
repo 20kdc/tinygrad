@@ -1,6 +1,6 @@
 from PIL import Image
 from tinygrad.tensor import Tensor
-from tinygrad.optim import SGD
+from tinygrad.optim import RMSprop
 import extra.waifu2x
 from extra.kinne import KinneDir
 import sys
@@ -39,9 +39,13 @@ if len(sys.argv) < 2:
   print("python3 -m examples.vgg7 execute_full MODELDIR IMG_IN IMG_OUT")
   print(" does the 'whole thing' (padding, tiling)")
   print(" safe for large images, etc.")
+  print("python3 -m examples.vgg7 execute_celery MODELDIR IMG_IN IMG_OUT PASSES DIR")
+  print(" extends an image in all directions (-1) or a given (0, 1, 2, 3) direction")
+  print(" by a given number of passes, assuming a CELERY model.")
+  print(" direction order is down, up, left, right.")
   print("python3 -m examples.vgg7 new MODELDIR")
   print(" creates a new model (experimental)")
-  print("python3 -m examples.vgg7 train MODELDIR SAMPLES_DIR ROUNDS ROUNDS_SAVE")
+  print("python3 -m examples.vgg7 train MODELDIR SAMPLES_DIR ROUNDS ROUNDS_SAVE LR")
   print(" trains a model (experimental)")
   print(" (how experimental? well, every time I tried it, it flooded w/ NaNs)")
   print(" note: ROUNDS < 0 means 'forever'. ROUNDS_SAVE <= 0 is not a good idea.")
@@ -55,6 +59,11 @@ if len(sys.argv) < 2:
   print(" creates overlapping micropatches (SIZExSIZE w/ 7-pixel border) for training")
   print(" maintains/creates samples_count.txt automatically")
   print(" unlike training, IMG_A must be exactly half the size of IMG_B")
+  print("python3 -m examples.vgg7 samplify_celery IMG SAMPLES_DIR SIZE")
+  print(" FOR CELERY: creates overlapping micropatches (SIZEx1 w/ 7-pixel border) for training")
+  print(" maintains/creates samples_count.txt automatically")
+  print(" 'A/B' images for CELERY network will automatically be generated.")
+  print(" (Both require some internal processing to work properly.)")
   sys.exit(1)
 
 cmd = sys.argv[1]
@@ -68,12 +77,56 @@ def load_and_save(path, save):
   if save:
     for v in vgg7.get_parameters():
       nansbane(v)
-  kn = KinneDir(model, save)
+  kn = KinneDir(path, save)
   kn.parameters(vgg7.get_parameters())
   kn.close()
   if not save:
     for v in vgg7.get_parameters():
       nansbane(v)
+
+def load_and_save_rmsprop(rmsprop, path, save):
+  if save:
+    for v in rmsprop.v:
+      nansbane(v)
+  kn = KinneDir(path + "/rmsprop", save)
+  kn.parameters(rmsprop.v)
+  kn.close()
+  if not save:
+    for v in vgg7.get_parameters():
+      nansbane(v)
+
+def actual_patch_extractor(a_img, b_img, samples_base, sample_size_w, sample_size_h, celery):
+  samples_count = get_sample_count(samples_base)
+  samples_added = 0
+
+  # this performs the first part of lower crop blinding for CELERY
+  required_lower_patch_context = CONTEXT
+  if celery:
+    required_lower_patch_context = 0
+  # actual patch extraction
+  for posy in range(CONTEXT, b_img.shape[2] - (required_lower_patch_context + sample_size_h - 1), sample_size_h):
+    for posx in range(CONTEXT, b_img.shape[3] - (CONTEXT + sample_size_w - 1), sample_size_w):
+      # this is a viable patch location, add it
+      # note the ranges here:
+      #  + there are always CONTEXT pixels *before* the point
+      #  + with no subtraction at the end, there'd already be a pixel *at* the point,
+      #     as ranges are exclusive
+      #  + additionally, there are sample_size - 1 additional sample pixels
+      #  + additionally, there are CONTEXT additional pixels
+      #  + therefore there are CONTEXT + sample_size pixels *at & after* the point
+      patch_x = a_img[:, :, posy - CONTEXT : posy + required_lower_patch_context + sample_size_h, posx - CONTEXT : posx + CONTEXT + sample_size_w]
+      if celery:
+        # now we only have the upper half of the patch, extend
+        patch_x = numpy.pad(patch_x, [[0, 0], [0, 0], [0, CONTEXT], [0, 0]], mode = "edge")
+      patch_y = b_img[:, :, posy : posy + sample_size_h, posx : posx + sample_size_w]
+
+      extra.waifu2x.image_save(samples_base + "/" + str(samples_count) + "a.png", patch_x)
+      extra.waifu2x.image_save(samples_base + "/" + str(samples_count) + "b.png", patch_y)
+      samples_count += 1
+      samples_added += 1
+
+  print("Added " + str(samples_added) + " samples")
+  set_sample_count(samples_base, samples_count)
 
 if cmd == "import":
   src = sys.argv[2]
@@ -99,6 +152,48 @@ elif cmd == "execute_full":
   load_and_save(model, False)
 
   extra.waifu2x.image_save(out_file, vgg7.forward_tiled(extra.waifu2x.image_load(in_file), 156))
+elif cmd == "execute_celery":
+  model = sys.argv[2]
+  in_file = sys.argv[3]
+  out_file = sys.argv[4]
+  passes = int(sys.argv[5])
+  direction = int(sys.argv[6])
+
+  load_and_save(model, False)
+
+  image = extra.waifu2x.image_load(in_file)
+
+  pass_dir_count = 1
+  if direction == -1:
+    pass_dir_count = 4
+  else:
+    # rotate into target
+    for i in range(direction):
+      image = extra.waifu2x.image_rotate_clockwise(image)
+
+  for i in range(passes):
+    print("Pass " + str(i))
+    for d in range(pass_dir_count):
+      image_h = image.shape[2]
+      # get context
+      context = image[:, :, image_h - (CONTEXT + 1) : image_h, :]
+      # pad context
+      context = numpy.pad(context, [[0, 0], [0, 0], [0, CONTEXT], [CONTEXT, CONTEXT]], mode = "edge")
+      # calculate
+      result = vgg7.forward(Tensor(context, requires_grad = False)).data
+      # append result
+      image = numpy.append(image, result, 2)
+      if direction == -1:
+        # rotate clockwise so the 4 covers all 4 rotations
+        image = extra.waifu2x.image_rotate_clockwise(image)
+
+  if direction != -1:
+    # rotate back
+    for i in range(4 - direction):
+      image = extra.waifu2x.image_rotate_clockwise(image)
+
+  extra.waifu2x.image_save(out_file, image)
+
 elif cmd == "new":
   model = sys.argv[2]
 
@@ -110,33 +205,19 @@ elif cmd == "train":
   samples_count = get_sample_count(samples_base)
   rounds = int(sys.argv[4])
   rounds_per_save = int(sys.argv[5])
+  lr = float(sys.argv[6])
 
   load_and_save(model, False)
 
-  # Initialize sample probabilities.
-  # This is used to try and get the network to focus on "interesting" samples,
-  #  which works nicely with the microsample system.
-  sample_probs = None
-  sample_probs_path = model + "/sample_probs.bin"
-  try:
-    # try to read...
-    sample_probs = numpy.fromfile(sample_probs_path, "<f8")
-    if sample_probs.shape[0] != samples_count:
-      print("sample probs size != sample count - initializing")
-      sample_probs = None
-  except:
-    # it's fine
-    print("sample probs could not be loaded - initializing")
-    pass
-
-  if sample_probs is None:
-    # This stupidly high amount is used to force an initial pass over all samples
-    sample_probs = numpy.ones(samples_count) * 1000
-
   print("Training...")
+
   # Adam has a tendency to destroy the state of the network when restarted
   # Plus it's slower
-  optim = SGD(vgg7.get_parameters())
+  optim = RMSprop(vgg7.get_parameters(), lr = lr)
+  try:
+    load_and_save_rmsprop(optim, model, False)
+  except:
+    print("Resetting RMSprop due to error")
 
   rnum = 0
   while True:
@@ -144,12 +225,7 @@ elif cmd == "train":
     if rnum == rounds:
       break
 
-    sample_idx = 0
-    try:
-      sample_idx = numpy.random.choice(samples_count, p = sample_probs / sample_probs.sum())
-    except:
-      print("exception occurred (PROBABLY value-probabilities-dont-sum-to-1)")
-      sample_idx = random.randint(0, samples_count - 1)
+    sample_idx = random.randint(0, samples_count - 1)
 
     x_img = extra.waifu2x.image_load(samples_base + "/" + str(sample_idx) + "a.png")
     y_img = extra.waifu2x.image_load(samples_base + "/" + str(sample_idx) + "b.png")
@@ -185,27 +261,23 @@ elif cmd == "train":
     if (rnum % rounds_per_save) == 0:
       print("Saving")
       load_and_save(model, True)
-      sample_probs.astype("<f8", "C").tofile(sample_probs_path)
+      load_and_save_rmsprop(optim, model, True)
 
     # Update round state
     # Number
     rnum = rnum + 1
-    # Probability management
-    # there must always be a probability, no matter how slim, even if loss goes to 0
-    sample_probs[sample_idx] = max(loss_indicator, 1.e-10)
 
   # if we were told to save every round, we already saved
   if rounds_per_save != 1:
     print("Done with all rounds, saving")
     load_and_save(model, True)
-    sample_probs.astype("<f8", "C").tofile(sample_probs_path)
+    load_and_save_rmsprop(optim, model, True)
 
 elif cmd == "samplify":
   a_img = sys.argv[2]
   b_img = sys.argv[3]
   samples_base = sys.argv[4]
   sample_size = int(sys.argv[5])
-  samples_count = get_sample_count(samples_base)
 
   # This bit is interesting because it actually does some work.
   # Not much, but some work.
@@ -222,29 +294,25 @@ elif cmd == "samplify":
   # pre-upscaling - this matches the sizes (and coordinates)
   a_img = a_img.repeat(2, 2).repeat(2, 3)
 
-  samples_added = 0
+  actual_patch_extractor(a_img, b_img, samples_base, sample_size, sample_size, False)
 
-  # actual patch extraction
-  for posy in range(CONTEXT, b_img.shape[2] - (CONTEXT + sample_size - 1), sample_size):
-    for posx in range(CONTEXT, b_img.shape[3] - (CONTEXT + sample_size - 1), sample_size):
-      # this is a viable patch location, add it
-      # note the ranges here:
-      #  + there are always CONTEXT pixels *before* the point
-      #  + with no subtraction at the end, there'd already be a pixel *at* the point,
-      #     as ranges are exclusive
-      #  + additionally, there are sample_size - 1 additional sample pixels
-      #  + additionally, there are CONTEXT additional pixels
-      #  + therefore there are CONTEXT + sample_size pixels *at & after* the point
-      patch_x = a_img[:, :, posy - CONTEXT : posy + CONTEXT + sample_size, posx - CONTEXT : posx + CONTEXT + sample_size]
-      patch_y = b_img[:, :, posy : posy + sample_size, posx : posx + sample_size]
+elif cmd == "samplify_celery":
+  o_img = sys.argv[2]
+  samples_base = sys.argv[3]
+  sample_size = int(sys.argv[4])
 
-      extra.waifu2x.image_save(samples_base + "/" + str(samples_count) + "a.png", patch_x)
-      extra.waifu2x.image_save(samples_base + "/" + str(samples_count) + "b.png", patch_y)
-      samples_count += 1
-      samples_added += 1
+  # Right, so: This original image has to be split into two, with one line removed in each variant.
+  o_img = extra.waifu2x.image_load(o_img)
 
-  print("Added " + str(samples_added) + " samples")
-  set_sample_count(samples_base, samples_count)
+  # as with the main library body,
+  # Y X order is used here
+
+  # Create the two versions. Note that it's just a 1-line shift.
+  # Contextual blinding is handled in the patch extractor.
+  a_img = o_img[:, :, 0 : o_img.shape[2] - 1, 0 : o_img.shape[3]]
+  b_img = o_img[:, :, 1 : o_img.shape[2], 0 : o_img.shape[3]]
+
+  actual_patch_extractor(a_img, b_img, samples_base, sample_size, 1, True)
 
 else:
   print("unknown command")

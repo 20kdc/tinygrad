@@ -40,6 +40,9 @@ def image_save(path, na: numpy.ndarray):
   # file
   Image.fromarray(na).save(path)
 
+def image_rotate_clockwise(na: numpy.ndarray):
+  return numpy.rot90(na, 1, axes=(2, 3))
+
 # The Model
 
 class Conv3x3Biased:
