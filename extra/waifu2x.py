@@ -10,6 +10,18 @@ from PIL import Image
 # tinygrad convolution tensor input layout is (1,c,y,x) - and therefore the form for all images used in the project
 # tinygrad convolution tensor weight layout is (outC,inC,H,W) - this matches NCNN (and therefore KINNE), but not waifu2x json
 
+def image_u8tof32(na: numpy.ndarray) -> numpy.ndarray:
+  """
+  Converts a uint8 image to a float32 image.
+  """
+  return na.astype("float32") / 255.0
+
+def image_f32tou8(na: numpy.ndarray) -> numpy.ndarray:
+  """
+  Converts a float32 image to a uint8 image.
+  """
+  return numpy.fmax(numpy.fmin(na * 255.0, 255), 0).astype("uint8")
+
 def image_load(path) -> numpy.ndarray:
   """
   Loads an image in the shape expected by other functions in this module.
@@ -19,10 +31,13 @@ def image_load(path) -> numpy.ndarray:
   na = numpy.array(Image.open(path))
   # fix shape
   na = numpy.moveaxis(na, [2,0,1], [0,1,2])
+  # shape MIGHT Be (4,h,w) if alpha is involved, strip that
+  if na.shape[0] == 4:
+    na = na[0:3,:,:]
   # shape is now (3,h,w), add 1
   na = na.reshape(1,3,na.shape[1],na.shape[2])
   # change type
-  na = na.astype("float32") / 255.0
+  na = image_u8tof32(na)
   return na
 
 def image_save(path, na: numpy.ndarray):
@@ -31,7 +46,7 @@ def image_save(path, na: numpy.ndarray):
   However, note this expects a numpy array.
   """
   # change type
-  na = numpy.fmax(numpy.fmin(na * 255.0, 255), 0).astype("uint8")
+  na = image_f32tou8(na)
   # shape is now (1,3,h,w), remove 1
   na = na.reshape(3,na.shape[2],na.shape[3])
   # fix shape

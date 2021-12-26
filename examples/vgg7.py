@@ -1,6 +1,6 @@
 from PIL import Image
 from tinygrad.tensor import Tensor
-from tinygrad.optim import RMSprop
+from tinygrad.optim import SGD
 import extra.waifu2x
 from extra.kinne import KinneDir
 import sys
@@ -92,17 +92,6 @@ def load_and_save(path, save):
     for v in vgg7.get_parameters():
       nansbane(v)
 
-def load_and_save_rmsprop(rmsprop, path, save):
-  if save:
-    for v in rmsprop.v:
-      nansbane(v)
-  kn = KinneDir(path + "/rmsprop", save)
-  kn.parameters(rmsprop.v)
-  kn.close()
-  if not save:
-    for v in vgg7.get_parameters():
-      nansbane(v)
-
 if cmd == "import":
   src = sys.argv[2]
   model = sys.argv[3]
@@ -157,14 +146,14 @@ elif cmd == "execute_celery" or cmd == "execute_celery_memes":
       context = numpy.pad(context, [[0, 0], [0, 0], [0, CONTEXT], [CONTEXT, CONTEXT]], mode = "edge")
       # calculate
       result = vgg7.forward(Tensor(context, requires_grad = False)).data
-      if not memes:
-        # clamp calculations
-        result = numpy.fmax(numpy.fmin(result, 1), 0)
       # append result
       image = numpy.append(image, result, 2)
       if direction == -1:
         # rotate clockwise so the 4 covers all 4 rotations
         image = extra.waifu2x.image_rotate_clockwise(image)
+      if not memes:
+        # clamp and reduce precision to help correct for small errors
+        result = extra.waifu2x.image_u8tof32(extra.waifu2x.image_f32tou8(result))
 
   if direction != -1:
     # rotate back
@@ -242,11 +231,7 @@ elif cmd == "train" or cmd == "train_celery":
 
   # Adam has a tendency to destroy the state of the network when restarted
   # Plus it's slower
-  optim = RMSprop(vgg7.get_parameters(), lr = lr)
-  try:
-    load_and_save_rmsprop(optim, model, False)
-  except:
-    print("Resetting RMSprop due to error")
+  optim = SGD(vgg7.get_parameters(), lr = lr)
 
   rnum = 0
   while True:
@@ -287,7 +272,6 @@ elif cmd == "train" or cmd == "train_celery":
     if (rnum % rounds_per_save) == 0:
       print("Saving")
       load_and_save(model, True)
-      load_and_save_rmsprop(optim, model, True)
 
     # Update round state
     # Number
@@ -297,7 +281,6 @@ elif cmd == "train" or cmd == "train_celery":
   if rounds_per_save != 1:
     print("Done with all rounds, saving")
     load_and_save(model, True)
-    load_and_save_rmsprop(optim, model, True)
 
 elif cmd == "samplify":
   a_img = sys.argv[2]
